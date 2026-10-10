@@ -1,0 +1,88 @@
+"""Exploratory Data Analysis for any CSV. Without --csv it uses scikit-learn's bundled Wine dataset."""
+import argparse
+import os
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from scipy import stats
+
+
+def load(path):
+    if path:
+        return pd.read_csv(path)
+    from sklearn.datasets import load_wine
+    ds = load_wine(as_frame=True)
+    df = ds.frame.copy()
+    df["target"] = df["target"].map(dict(enumerate(ds.target_names)))
+    return df
+
+
+def iqr_outliers(s: pd.Series):
+    q1, q3 = s.quantile([0.25, 0.75])
+    iqr = q3 - q1
+    return ((s < q1 - 1.5 * iqr) | (s > q3 + 1.5 * iqr)).sum()
+
+
+def main(csv, out, target):
+    os.makedirs(out, exist_ok=True)
+    df = load(csv)
+    num = df.select_dtypes(include=np.number)
+    cat_cols = df.select_dtypes(exclude=np.number).columns.tolist()
+    target = target or (cat_cols[0] if cat_cols else None)
+
+    print("1) STRUCTURE")
+    print(f"Rows: {len(df)}, Columns: {df.shape[1]}")
+    print(df.dtypes.to_string(), "\n")
+
+    print("2) DATA QUALITY")
+    print("Missing values per column:\n", df.isna().sum().to_string())
+    print("Duplicate rows:", df.duplicated().sum(), "\n")
+
+    print("3) SUMMARY STATISTICS")
+    print(num.describe().T.round(2).to_string(), "\n")
+
+    print("4) OUTLIERS (IQR rule)")
+    out_counts = {c: int(iqr_outliers(num[c].dropna())) for c in num.columns}
+    print({k: v for k, v in out_counts.items() if v}, "\n")
+
+    print("5) CORRELATIONS")
+    corr = num.corr()
+    pairs = corr.where(np.triu(np.ones(corr.shape, dtype=bool), 1)).stack().sort_values(key=abs, ascending=False)
+    print(pairs.head(5).round(2).to_string(), "\n")
+
+    # Plots
+    num.hist(figsize=(14, 10), bins=20, color="#3b82f6")
+    plt.tight_layout(); plt.savefig(f"{out}/histograms.png", dpi=120); plt.close()
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(corr, cmap="coolwarm", center=0, annot=len(corr) <= 12, fmt=".1f")
+    plt.title("Correlation heatmap"); plt.tight_layout()
+    plt.savefig(f"{out}/correlation_heatmap.png", dpi=120); plt.close()
+
+    # Hypothesis test: does the first strongly-correlated feature differ across groups?
+    if target and df[target].nunique() >= 2:
+        groups = df[target].unique()
+        feature = pairs.index[0][0]
+        samples = [df.loc[df[target] == g, feature].dropna() for g in groups]
+        f_stat, p = stats.f_oneway(*samples)
+        print(f"6) HYPOTHESIS TEST: does '{feature}' differ between '{target}' groups?")
+        print(f"ANOVA F={f_stat:.2f}, p={p:.2e} ->", "significant difference" if p < 0.05 else "no significant difference")
+        plt.figure(figsize=(7, 5))
+        sns.boxplot(data=df, x=target, y=feature)
+        plt.title(f"{feature} by {target}"); plt.tight_layout()
+        plt.savefig(f"{out}/boxplot_by_group.png", dpi=120); plt.close()
+
+    print(f"\nCharts saved in ./{out}/")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv", help="path to a CSV file (default: Wine dataset)")
+    ap.add_argument("--target", help="categorical column used to compare groups")
+    ap.add_argument("--out", default="outputs")
+    a = ap.parse_args()
+    main(a.csv, a.out, a.target)
